@@ -642,20 +642,7 @@ def parse_set_result(response, **options):
     return response and str_if_bytes(response) == "OK"
 
 
-class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
-    """
-    Implementation of the Redis protocol.
-
-    This abstract class provides a Python interface to all Redis commands
-    and an implementation of the Redis protocol.
-
-    Pipelines derive from this, implementing how
-    the commands are sent and received to the Redis server. Based on
-    configuration, an instance will either use a ConnectionPool, or
-    Connection object to talk to redis.
-    """
-
-    RESPONSE_CALLBACKS = {
+RESPONSE_CALLBACKS = {
         **string_keys_to_dict(
             "AUTH COPY EXPIRE EXPIREAT PEXPIRE PEXPIREAT "
             "HEXISTS HMSET LMOVE BLMOVE MOVE "
@@ -806,6 +793,21 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
         "ZSCAN": parse_zscan,
         "ZMSCORE": parse_zmscore,
     }
+
+_cb = CaseInsensitiveDict(RESPONSE_CALLBACKS)
+
+class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
+    """
+    Implementation of the Redis protocol.
+
+    This abstract class provides a Python interface to all Redis commands
+    and an implementation of the Redis protocol.
+
+    Pipelines derive from this, implementing how
+    the commands are sent and received to the Redis server. Based on
+    configuration, an instance will either use a ConnectionPool, or
+    Connection object to talk to redis.
+    """
 
     @classmethod
     def from_url(cls, url, **kwargs):
@@ -973,7 +975,7 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
         if single_connection_client:
             self.connection = self.connection_pool.get_connection("_")
 
-        self.response_callbacks = CaseInsensitiveDict(self.__class__.RESPONSE_CALLBACKS)
+        self.response_callbacks = _cb
 
     def __repr__(self):
         return f"{type(self).__name__}<{repr(self.connection_pool)}>"

@@ -87,6 +87,12 @@ MODULE_EXPORTS_DATA_TYPES_ERROR = (
 class Encoder:
     "Encode strings to bytes-like and decode bytes-like to strings"
 
+    def __new__(cls, *args, **kwargs):
+        with threading.RLock():
+            if getattr(cls, str(args), None) is None:
+                setattr(cls, str(args), object.__new__(cls))
+        return getattr(cls, str(args))
+
     def __init__(self, encoding, encoding_errors, decode_responses):
         self.encoding = encoding
         self.encoding_errors = encoding_errors
@@ -373,9 +379,6 @@ class HiredisParser(BaseParser):
             raise RedisError("Hiredis is not installed")
         self.socket_read_size = socket_read_size
 
-        if HIREDIS_USE_BYTE_BUFFER:
-            self._buffer = bytearray(socket_read_size)
-
     def __del__(self):
         try:
             self.on_disconnect()
@@ -423,10 +426,11 @@ class HiredisParser(BaseParser):
             if custom_timeout:
                 sock.settimeout(timeout)
             if HIREDIS_USE_BYTE_BUFFER:
-                bufflen = self._sock.recv_into(self._buffer)
+                _buffer = bytearray(self.socket_read_size)
+                bufflen = self._sock.recv_into(_buffer)
                 if bufflen == 0:
                     raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR)
-                self._reader.feed(self._buffer, 0, bufflen)
+                self._reader.feed(_buffer, 0, bufflen)
             else:
                 buffer = self._sock.recv(self.socket_read_size)
                 # an empty string indicates the server shutdown the socket
