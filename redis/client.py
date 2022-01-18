@@ -515,18 +515,7 @@ def parse_acl_getuser(response, **options):
     data['enabled'] = 'on' in data['flags']
     return data
 
-
-class Redis(object):
-    """
-    Implementation of the Redis protocol.
-
-    This abstract class provides a Python interface to all Redis commands
-    and an implementation of the Redis protocol.
-
-    Connection and Pipeline derive from this, implementing how
-    the commands are sent and received to the Redis server
-    """
-    RESPONSE_CALLBACKS = dict_merge(
+RESPONSE_CALLBACKS = dict_merge(
         string_keys_to_dict(
             'AUTH EXPIRE EXPIREAT HEXISTS HMSET MOVE MSETNX PERSIST '
             'PSETEX RENAMENX SISMEMBER SMOVE SETEX SETNX',
@@ -658,6 +647,18 @@ class Redis(object):
             'ZSCAN': parse_zscan,
         }
     )
+_cb = CaseInsensitiveDict(RESPONSE_CALLBACKS)
+
+class Redis(object):
+    """
+    Implementation of the Redis protocol.
+
+    This abstract class provides a Python interface to all Redis commands
+    and an implementation of the Redis protocol.
+
+    Connection and Pipeline derive from this, implementing how
+    the commands are sent and received to the Redis server
+    """
 
     @classmethod
     def from_url(cls, url, db=None, **kwargs):
@@ -763,8 +764,7 @@ class Redis(object):
         if single_connection_client:
             self.connection = self.connection_pool.get_connection('_')
 
-        self.response_callbacks = CaseInsensitiveDict(
-            self.__class__.RESPONSE_CALLBACKS)
+        self.response_callbacks = _cb
 
     def __repr__(self):
         return "%s<%s>" % (type(self).__name__, repr(self.connection_pool))

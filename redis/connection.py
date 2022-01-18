@@ -1,4 +1,6 @@
 from __future__ import unicode_literals
+
+import weakref
 from distutils.version import StrictVersion
 from itertools import chain
 from time import time
@@ -94,6 +96,12 @@ SENTINEL = object()
 
 class Encoder(object):
     "Encode strings to bytes-like and decode bytes-like to strings"
+
+    def __new__(cls, *args, **kwargs):
+        with threading.RLock():
+            if getattr(cls, str(args), None) is None:
+                setattr(cls, str(args), object.__new__(cls))
+        return getattr(cls, str(args))
 
     def __init__(self, encoding, encoding_errors, decode_responses):
         self.encoding = encoding
@@ -373,9 +381,6 @@ class HiredisParser(BaseParser):
             raise RedisError("Hiredis is not installed")
         self.socket_read_size = socket_read_size
 
-        if HIREDIS_USE_BYTE_BUFFER:
-            self._buffer = bytearray(socket_read_size)
-
     def __del__(self):
         try:
             self.on_disconnect()
@@ -424,10 +429,11 @@ class HiredisParser(BaseParser):
             if custom_timeout:
                 sock.settimeout(timeout)
             if HIREDIS_USE_BYTE_BUFFER:
-                bufflen = recv_into(self._sock, self._buffer)
+                _buffer = bytearray(self.socket_read_size)
+                bufflen = recv_into(self._sock, _buffer)
                 if bufflen == 0:
                     raise ConnectionError(SERVER_CLOSED_CONNECTION_ERROR)
-                self._reader.feed(self._buffer, 0, bufflen)
+                self._reader.feed(_buffer, 0, bufflen)
             else:
                 buffer = recv(self._sock, self.socket_read_size)
                 # an empty string indicates the server shutdown the socket
@@ -546,7 +552,7 @@ class Connection(object):
             pass
 
     def register_connect_callback(self, callback):
-        self._connect_callbacks.append(callback)
+        self._connect_callbacks.append(weakref.WeakMethod(callback))
 
     def clear_connect_callbacks(self):
         self._connect_callbacks = []
