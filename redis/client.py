@@ -642,11 +642,12 @@ def parse_set_result(response, **options):
     return response and str_if_bytes(response) == "OK"
 
 
-RESPONSE_CALLBACKS = {
+class AbstractRedis:
+    RESPONSE_CALLBACKS = {
         **string_keys_to_dict(
             "AUTH COPY EXPIRE EXPIREAT PEXPIRE PEXPIREAT "
-            "HEXISTS HMSET LMOVE BLMOVE MOVE "
-            "MSETNX PERSIST PSETEX RENAMENX SISMEMBER SMOVE SETEX SETNX",
+            "HEXISTS HMSET MOVE MSETNX PERSIST "
+            "PSETEX RENAMENX SISMEMBER SMOVE SETEX SETNX",
             bool,
         ),
         **string_keys_to_dict(
@@ -732,6 +733,10 @@ RESPONSE_CALLBACKS = {
         "CONFIG RESETSTAT": bool_ok,
         "CONFIG SET": bool_ok,
         "DEBUG OBJECT": parse_debug_object,
+        "FUNCTION DELETE": bool_ok,
+        "FUNCTION FLUSH": bool_ok,
+        "FUNCTION LOAD": bool_ok,
+        "FUNCTION RESTORE": bool_ok,
         "GEOHASH": lambda r: list(map(str_if_bytes, r)),
         "GEOPOS": lambda r: list(
             map(lambda ll: (float(ll[0]), float(ll[1])) if ll is not None else None, r)
@@ -794,9 +799,8 @@ RESPONSE_CALLBACKS = {
         "ZMSCORE": parse_zmscore,
     }
 
-_cb = CaseInsensitiveDict(RESPONSE_CALLBACKS)
 
-class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
+class Redis(AbstractRedis, RedisModuleCommands, CoreCommands, SentinelCommands):
     """
     Implementation of the Redis protocol.
 
@@ -975,7 +979,7 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
         if single_connection_client:
             self.connection = self.connection_pool.get_connection("_")
 
-        self.response_callbacks = _cb
+        self.response_callbacks = CaseInsensitiveDict(self.__class__.RESPONSE_CALLBACKS)
 
     def __repr__(self):
         return f"{type(self).__name__}<{repr(self.connection_pool)}>"
@@ -1078,7 +1082,10 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
         continue trying forever. ``blocking_timeout`` can be specified as a
         float or integer, both representing the number of seconds to wait.
 
-        ``lock_class`` forces the specified lock implementation.
+        ``lock_class`` forces the specified lock implementation. Note that as
+        of redis-py 3.0, the only lock class we implement is ``Lock`` (which is
+        a Lua-based lock). So, it's unlikely you'll need this parameter, unless
+        you have created your own custom lock class.
 
         ``thread_local`` indicates whether the lock token is placed in
         thread-local storage. By default, the token is placed in thread local

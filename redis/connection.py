@@ -467,10 +467,17 @@ class HiredisParser(BaseParser):
             self._next_response = False
             return response
 
-        response = self._reader.gets()
+        if disable_decoding:
+            response = self._reader.gets(False)
+        else:
+            response = self._reader.gets()
+
         while response is False:
             self.read_from_socket()
-            response = self._reader.gets()
+            if disable_decoding:
+                response = self._reader.gets(False)
+            else:
+                response = self._reader.gets()
         # if an older version of hiredis is installed, we need to attempt
         # to convert ResponseErrors to their appropriate types.
         if not HIREDIS_SUPPORTS_CALLABLE_ERRORS:
@@ -608,7 +615,9 @@ class Connection:
         if self._sock:
             return
         try:
-            sock = self._connect()
+            sock = self.retry.call_with_retry(
+                lambda: self._connect(), lambda error: self.disconnect(error)
+            )
         except socket.timeout:
             raise TimeoutError("Timeout connecting to server")
         except OSError as e:
@@ -679,12 +688,19 @@ class Connection:
         # args for socket.error can either be (errno, "message")
         # or just "message"
         if len(exception.args) == 1:
-            return f"Error connecting to {self.host}:{self.port}. {exception.args[0]}."
+            try:
+                return f"Error connecting to {self.host}:{self.port}. \
+                        {exception.args[0]}."
+            except AttributeError:
+                return f"Connection Error: {exception.args[0]}"
         else:
-            return (
-                f"Error {exception.args[0]} connecting to "
-                f"{self.host}:{self.port}. {exception.args[1]}."
-            )
+            try:
+                return (
+                    f"Error {exception.args[0]} connecting to "
+                    f"{self.host}:{self.port}. {exception.args[1]}."
+                )
+            except AttributeError:
+                return f"Connection Error: {exception.args[0]}"
 
     def on_connect(self):
         "Initialize the connection, authenticate and select a database"
@@ -725,7 +741,7 @@ class Connection:
             if str_if_bytes(self.read_response()) != "OK":
                 raise ConnectionError("Invalid Database")
 
-    def disconnect(self):
+    def disconnect(self, *args):
         "Disconnects from the Redis server"
         self._parser.on_disconnect()
         if self._sock is None:
@@ -801,15 +817,18 @@ class Connection:
     def read_response(self, disable_decoding=False):
         """Read the response from a previously sent command"""
         try:
+            hosterr = f"{self.host}:{self.port}"
+        except AttributeError:
+            hosterr = "connection"
+
+        try:
             response = self._parser.read_response(disable_decoding=disable_decoding)
         except socket.timeout:
             self.disconnect()
-            raise TimeoutError(f"Timeout reading from {self.host}:{self.port}")
+            raise TimeoutError(f"Timeout reading from {hosterr}")
         except OSError as e:
             self.disconnect()
-            raise ConnectionError(
-                f"Error while reading from {self.host}:{self.port}" f" : {e.args}"
-            )
+            raise ConnectionError(f"Error while reading from {hosterr}" f" : {e.args}")
         except BaseException:
             self.disconnect()
             raise
@@ -1562,7 +1581,7 @@ class BlockingConnectionPool(ConnectionPool):
             try:
                 if connection.can_read():
                     raise ConnectionError("Connection has data")
-            except ConnectionError:
+            except (ConnectionError, OSError):
                 connection.disconnect()
                 connection.connect()
                 if connection.can_read():
