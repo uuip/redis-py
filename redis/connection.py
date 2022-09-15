@@ -40,9 +40,7 @@ try:
 except ImportError:
     ssl_available = False
 
-NONBLOCKING_EXCEPTION_ERROR_NUMBERS = {
-    BlockingIOError: errno.EWOULDBLOCK,
-}
+NONBLOCKING_EXCEPTION_ERROR_NUMBERS = {BlockingIOError: errno.EWOULDBLOCK}
 
 if ssl_available:
     if hasattr(ssl, "SSLWantReadError"):
@@ -82,6 +80,15 @@ MODULE_EXPORTS_DATA_TYPES_ERROR = (
     "exports one or more module-side data "
     "types, can't unload"
 )
+# user send an AUTH cmd to a server without authorization configured
+NO_AUTH_SET_ERROR = {
+    # Redis >= 6.0
+    "AUTH <password> called without any password "
+    "configured for the default user. Are you sure "
+    "your configuration is correct?": AuthenticationError,
+    # Redis < 6.0
+    "Client sent AUTH, but no password is set": AuthenticationError,
+}
 
 
 class Encoder:
@@ -135,7 +142,6 @@ class BaseParser:
     EXCEPTION_CLASSES = {
         "ERR": {
             "max number of clients reached": ConnectionError,
-            "Client sent AUTH, but no password is set": AuthenticationError,
             "invalid password": AuthenticationError,
             # some Redis server versions report invalid command syntax
             # in lowercase
@@ -149,7 +155,9 @@ class BaseParser:
             MODULE_EXPORTS_DATA_TYPES_ERROR: ModuleError,
             NO_SUCH_MODULE_ERROR: ModuleError,
             MODULE_UNLOAD_NOT_POSSIBLE_ERROR: ModuleError,
+            **NO_AUTH_SET_ERROR,
         },
+        "WRONGPASS": AuthenticationError,
         "EXECABORT": ExecAbortError,
         "LOADING": BusyLoadingError,
         "NOSCRIPT": NoScriptError,
@@ -388,10 +396,7 @@ class HiredisParser(BaseParser):
     def on_connect(self, connection, **kwargs):
         self._sock = connection._sock
         self._socket_timeout = connection.socket_timeout
-        kwargs = {
-            "protocolError": InvalidResponse,
-            "replyError": self.parse_error,
-        }
+        kwargs = {"protocolError": InvalidResponse, "replyError": self.parse_error}
 
         # hiredis < 0.1.3 doesn't support functions that create exceptions
         if not HIREDIS_SUPPORTS_CALLABLE_ERRORS:
@@ -524,7 +529,7 @@ class Connection:
         socket_keepalive_options=None,
         socket_type=0,
         retry_on_timeout=False,
-        retry_on_error=[],
+        retry_on_error=SENTINEL,
         encoding="utf-8",
         encoding_errors="strict",
         decode_responses=False,
@@ -556,6 +561,8 @@ class Connection:
         self.socket_keepalive_options = socket_keepalive_options or {}
         self.socket_type = socket_type
         self.retry_on_timeout = retry_on_timeout
+        if retry_on_error is SENTINEL:
+            retry_on_error = []
         if retry_on_timeout:
             # Add TimeoutError to the errors list to retry on
             retry_on_error.append(TimeoutError)
@@ -567,7 +574,7 @@ class Connection:
                 # deep-copy the Retry object as it is mutable
                 self.retry = copy.deepcopy(retry)
             # Update the retry's supported errors with the specified errors
-            self.retry.update_supported_erros(retry_on_error)
+            self.retry.update_supported_errors(retry_on_error)
         else:
             self.retry = Retry(NoBackoff(), 0)
         self.health_check_interval = health_check_interval
@@ -812,7 +819,13 @@ class Connection:
         sock = self._sock
         if not sock:
             self.connect()
-        return self._parser.can_read(timeout)
+        try:
+            return self._parser.can_read(timeout)
+        except OSError as e:
+            self.disconnect()
+            raise ConnectionError(
+                f"Error while reading from {self.host}:{self.port}: {e.args}"
+            )
 
     def read_response(self, disable_decoding=False):
         """Read the response from a previously sent command"""
@@ -1033,8 +1046,7 @@ class SSLConnection(Connection):
                 staple_ctx = self.ssl_ocsp_context
 
             staple_ctx.set_ocsp_client_callback(
-                ocsp_staple_verifier,
-                self.ssl_ocsp_expected_cert,
+                ocsp_staple_verifier, self.ssl_ocsp_expected_cert
             )
 
             #  need another socket
@@ -1069,7 +1081,7 @@ class UnixDomainSocketConnection(Connection):
         encoding_errors="strict",
         decode_responses=False,
         retry_on_timeout=False,
-        retry_on_error=[],
+        retry_on_error=SENTINEL,
         parser_class=DefaultParser,
         socket_read_size=65536,
         health_check_interval=0,
@@ -1092,6 +1104,8 @@ class UnixDomainSocketConnection(Connection):
         self.password = password
         self.socket_timeout = socket_timeout
         self.retry_on_timeout = retry_on_timeout
+        if retry_on_error is SENTINEL:
+            retry_on_error = []
         if retry_on_timeout:
             # Add TimeoutError to the errors list to retry on
             retry_on_error.append(TimeoutError)
@@ -1103,7 +1117,7 @@ class UnixDomainSocketConnection(Connection):
                 # deep-copy the Retry object as it is mutable
                 self.retry = copy.deepcopy(retry)
             # Update the retry's supported errors with the specified errors
-            self.retry.update_supported_erros(retry_on_error)
+            self.retry.update_supported_errors(retry_on_error)
         else:
             self.retry = Retry(NoBackoff(), 0)
         self.health_check_interval = health_check_interval
@@ -1117,10 +1131,7 @@ class UnixDomainSocketConnection(Connection):
         self._buffer_cutoff = 6000
 
     def repr_pieces(self):
-        pieces = [
-            ("path", self.path),
-            ("db", self.db),
-        ]
+        pieces = [("path", self.path), ("db", self.db)]
         if self.client_name:
             pieces.append(("client_name", self.client_name))
         return pieces
@@ -1169,6 +1180,16 @@ URL_QUERY_ARGUMENT_PARSERS = {
 
 
 def parse_url(url):
+    if not (
+        url.startswith("redis://")
+        or url.startswith("rediss://")
+        or url.startswith("unix://")
+    ):
+        raise ValueError(
+            "Redis URL must specify one of the following "
+            "schemes (redis://, rediss://, unix://)"
+        )
+
     url = urlparse(url)
     kwargs = {}
 
@@ -1195,7 +1216,7 @@ def parse_url(url):
             kwargs["path"] = unquote(url.path)
         kwargs["connection_class"] = UnixDomainSocketConnection
 
-    elif url.scheme in ("redis", "rediss"):
+    else:  # implied:  url.scheme in ("redis", "rediss"):
         if url.hostname:
             kwargs["host"] = unquote(url.hostname)
         if url.port:
@@ -1211,11 +1232,6 @@ def parse_url(url):
 
         if url.scheme == "rediss":
             kwargs["connection_class"] = SSLConnection
-    else:
-        raise ValueError(
-            "Redis URL must specify one of the following "
-            "schemes (redis://, rediss://, unix://)"
-        )
 
     return kwargs
 
@@ -1286,7 +1302,7 @@ class ConnectionPool:
     def __init__(
         self, connection_class=Connection, max_connections=None, **connection_kwargs
     ):
-        max_connections = max_connections or 2 ** 31
+        max_connections = max_connections or 2**31
         if not isinstance(max_connections, int) or max_connections < 0:
             raise ValueError('"max_connections" must be a positive integer')
 
